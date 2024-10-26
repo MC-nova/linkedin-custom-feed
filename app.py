@@ -1,103 +1,177 @@
 import streamlit as st
 from linkedin_api import Linkedin
-import json
-from datetime import datetime
-import os
-from typing import List, Dict
+from datetime import datetime, timedelta
+import pandas as pd
 
-class LinkedInCustomFeed:
-    def __init__(self, username: str = None, password: str = None):
+class LinkedInFeedManager:
+    def __init__(self, email: str, password: str):
         """
-        Inizializza il client LinkedIn con le credenziali
+        Inizializza il client LinkedIn usando l'API non ufficiale
         """
-        if username and password:
-            self.api = Linkedin(username, password)
-            self.following_list = []
-            self.feed_cache = "feed_cache.json"
-        else:
-            raise ValueError("Username e password sono richiesti")
-
-    def add_to_following(self, linkedin_url: str) -> bool:
+        self.api = Linkedin(email, password)
+        # Usa st.session_state invece del file locale
+        if 'following_list' not in st.session_state:
+            st.session_state.following_list = []
+    
+    def add_profile(self, profile_url: str) -> bool:
         """
         Aggiunge un profilo alla lista dei seguiti
         """
         try:
-            # Estrae l'ID pubblico dall'URL
-            public_id = linkedin_url.split('/in/')[-1].strip('/')
-            profile = self.api.get_profile(public_id)
+            # Estrae l'ID del profilo dall'URL
+            profile_id = profile_url.split('/in/')[-1].strip('/')
             
-            if profile:
-                self.following_list.append({
-                    'public_id': public_id,
-                    'name': profile.get('firstName', '') + ' ' + profile.get('lastName', ''),
-                    'added_on': datetime.now().isoformat()
-                })
-                return True
+            # Verifica se il profilo esiste e ottiene le informazioni
+            profile_info = self.api.get_profile(profile_id)
+            
+            if profile_info:
+                # Aggiungi alla lista se non è già presente
+                if not any(p['id'] == profile_id for p in st.session_state.following_list):
+                    st.session_state.following_list.append({
+                        'id': profile_id,
+                        'name': f"{profile_info.get('firstName', '')} {profile_info.get('lastName', '')}",
+                        'headline': profile_info.get('headline', ''),
+                        'added_on': datetime.now().isoformat()
+                    })
+                    return True
             return False
         except Exception as e:
-            st.error(f"Errore nell'aggiunta del profilo: {e}")
+            st.error(f"Errore nell'aggiunta del profilo: {str(e)}")
             return False
+    
+    def get_posts(self, days_back: int = 7) -> list:
+        """
+        Recupera i post recenti dai profili seguiti
+        """
+        all_posts = []
+        cut_off_date = datetime.now() - timedelta(days=days_back)
+        
+        for profile in st.session_state.following_list:
+            try:
+                # Recupera i post del profilo
+                posts = self.api.get_profile_posts(profile['id'], limit=10)
+                
+                for post in posts:
+                    post_date = datetime.fromtimestamp(post.get('time', 0)/1000)
+                    if post_date >= cut_off_date:
+                        all_posts.append({
+                            'author': profile['name'],
+                            'date': post_date.strftime('%Y-%m-%d %H:%M'),
+                            'text': post.get('commentary', ''),
+                            'likes': post.get('numLikes', 0),
+                            'comments': post.get('numComments', 0)
+                        })
+            except Exception as e:
+                st.warning(f"Impossibile recuperare i post per {profile['name']}: {str(e)}")
+                continue
+        
+        # Ordina i post per data
+        return sorted(all_posts, key=lambda x: x['date'], reverse=True)
 
-# Inizializzazione dello state se non esiste
-if 'custom_feed' not in st.session_state:
-    st.session_state.custom_feed = None
+# Configurazione Streamlit
+st.set_page_config(page_title="LinkedIn Custom Feed", page_icon="📱", layout="wide")
+
+# Configurazione tema personalizzato
+st.markdown("""
+    <style>
+    .stButton>button {
+        background-color: #0A66C2;
+        color: white;
+    }
+    .sidebar .sidebar-content {
+        background-color: #f3f2ef;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Gestione dello stato della sessione
+if 'feed_manager' not in st.session_state:
+    st.session_state.feed_manager = None
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-
-# Configurazione della pagina Streamlit
-st.set_page_config(page_title="LinkedIn Custom Feed", page_icon="📱", layout="wide")
 
 # Sidebar per login e gestione profili
 with st.sidebar:
     st.title("📱 LinkedIn Custom Feed")
     
-    # Login form
-    st.subheader("Login")
-    email = st.text_input("Email LinkedIn", type="default")
-    password = st.text_input("Password", type="password")
+    if not st.session_state.logged_in:
+        st.subheader("Login")
+        with st.form("login_form"):
+            email = st.text_input("Email LinkedIn")
+            password = st.text_input("Password LinkedIn", type="password")
+            submit_button = st.form_submit_button("Login")
+            
+            if submit_button:
+                try:
+                    st.session_state.feed_manager = LinkedInFeedManager(email, password)
+                    st.session_state.logged_in = True
+                    st.success("Login effettuato con successo!")
+                except Exception as e:
+                    st.error(f"Errore durante il login: {str(e)}")
     
-    if st.button("Login"):
-        try:
-            if email and password:
-                st.session_state.custom_feed = LinkedInCustomFeed(email, password)
-                st.session_state.logged_in = True
-                st.success("Login effettuato con successo!")
-            else:
-                st.error("Inserisci email e password")
-        except Exception as e:
-            st.error(f"Errore durante il login: {str(e)}")
-    
-    # Form per aggiungere nuovi profili (solo se loggato)
     if st.session_state.logged_in:
         st.subheader("Aggiungi Profilo")
-        new_profile = st.text_input("URL Profilo LinkedIn")
-        if st.button("Aggiungi"):
-            if st.session_state.custom_feed.add_to_following(new_profile):
-                st.success("Profilo aggiunto con successo!")
-            else:
-                st.error("Errore nell'aggiungere il profilo")
+        with st.form("add_profile_form"):
+            profile_url = st.text_input("URL Profilo LinkedIn", 
+                                      placeholder="https://www.linkedin.com/in/username")
+            submit_profile = st.form_submit_button("Aggiungi Profilo")
+            
+            if submit_profile:
+                if st.session_state.feed_manager.add_profile(profile_url):
+                    st.success("Profilo aggiunto con successo!")
+                else:
+                    st.error("Errore nell'aggiungere il profilo")
 
 # Area principale
 st.title("Il tuo Feed Personalizzato")
 
-if st.session_state.logged_in and st.session_state.custom_feed:
-    try:
-        # Bottone per aggiornare il feed
-        if st.button("Aggiorna Feed"):
-            with st.spinner("Aggiornamento feed in corso..."):
-                feed = st.session_state.custom_feed.get_custom_feed()
-                st.session_state.custom_feed.save_feed_to_file()
-                st.success("Feed aggiornato!")
-        
-        # Mostra la lista dei profili seguiti
-        if st.session_state.custom_feed.following_list:
-            st.subheader("Profili Seguiti")
-            for person in st.session_state.custom_feed.following_list:
-                st.write(f"- {person['name']} (aggiunto il {person['added_on']})")
-        else:
-            st.info("Non stai ancora seguendo nessun profilo. Aggiungi profili dalla barra laterale.")
+if st.session_state.logged_in:
+    # Filtro temporale
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        days = st.slider("Mostra post degli ultimi giorni:", 1, 30, 7)
+    with col2:
+        refresh = st.button("🔄 Aggiorna Feed", use_container_width=True)
+    
+    # Recupera e mostra i post
+    if refresh:
+        with st.spinner("Recupero i post..."):
+            posts = st.session_state.feed_manager.get_posts(days)
             
-    except Exception as e:
-        st.error(f"Si è verificato un errore: {str(e)}")
+            if posts:
+                # Converti in DataFrame per una migliore visualizzazione
+                df = pd.DataFrame(posts)
+                
+                # Mostra ogni post in un container
+                for _, post in df.iterrows():
+                    with st.container():
+                        st.markdown(f"""
+                        <div style='background-color: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;'>
+                            <h3 style='margin: 0; color: #0A66C2;'>{post['author']}</h3>
+                            <p style='color: #666; font-size: 0.8em;'>{post['date']}</p>
+                            <p style='margin: 10px 0;'>{post['text']}</p>
+                            <div style='display: flex; gap: 20px;'>
+                                <span>👍 {post['likes']}</span>
+                                <span>💬 {post['comments']}</span>
+                            </div>
+                        </div>
+                        <br>
+                        """, unsafe_allow_html=True)
+            else:
+                st.info("Nessun post trovato nel periodo selezionato")
+    
+    # Mostra profili seguiti
+    with st.sidebar:
+        st.subheader("Profili Seguiti")
+        if len(st.session_state.following_list) > 0:
+            for profile in st.session_state.following_list:
+                st.markdown(f"""
+                <div style='background-color: white; padding: 10px; border-radius: 5px; margin: 5px 0; border: 1px solid #ddd;'>
+                    <strong>{profile['name']}</strong><br>
+                    <small>{profile.get('headline', '')}</small>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("Non stai seguendo ancora nessun profilo")
 else:
     st.info("Effettua il login per visualizzare il tuo feed personalizzato")
